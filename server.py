@@ -46,7 +46,12 @@ GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_REVOKE_URL = "https://oauth2.googleapis.com/revoke"
 SCOPES = [
-    "https://www.googleapis.com/auth/health",
+    "https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly",
+    "https://www.googleapis.com/auth/googlehealth.health_metrics_and_measurements.readonly",
+    "https://www.googleapis.com/auth/googlehealth.sleep.readonly",
+    "https://www.googleapis.com/auth/googlehealth.location.readonly",
+    "https://www.googleapis.com/auth/googlehealth.ecg.readonly",
+    "https://www.googleapis.com/auth/googlehealth.irn.readonly",
     "openid",
     "https://www.googleapis.com/auth/userinfo.profile",
 ]
@@ -123,7 +128,7 @@ def get_valid_token(cfg):
     return None, "Not authenticated. Please sign in with Google."
 
 # ── Google Health API Client ────────────────────────────────────────────────
-HEALTH_API_BASE = "https://www.googleapis.com/health/v4"
+HEALTH_API_BASE = "https://health.googleapis.com/v4"
 
 # Data types and their friendly names
 DATA_TYPES = {
