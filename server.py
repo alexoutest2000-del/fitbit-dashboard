@@ -780,4 +780,4 @@ if __name__ == "__main__":
     print(f"  Network: http://{local_ip}:{port}")
     print(f"  Redirect URI must match: {cfg.get('redirect_uri', 'http://localhost:8080/oauth/callback')}")
 
-    app.run(host=host, port=port, debug=False)
+    app.run(host=host, port=port, debug=False, ssl_context=("cert.pem", "cert.key"))
