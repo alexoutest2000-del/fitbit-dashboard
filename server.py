@@ -130,41 +130,48 @@ def get_valid_token(cfg):
 # ── Google Health API Client ────────────────────────────────────────────────
 HEALTH_API_BASE = "https://health.googleapis.com/v4"
 
-# Data types and their friendly names
+# Data types and their friendly names (Health API uses simple hyphenated names)
 DATA_TYPES = {
-    "com.google.steps": ("Steps", "👣", "steps"),
-    "com.google.heart_rate": ("Heart Rate", "❤️", "bpm"),
-    "com.google.active_zone_minutes": ("Active Zone Minutes", "🔥", "min"),
-    "com.google.total_calories": ("Calories", "⚡", "kcal"),
-    "com.google.weight": ("Weight", "⚖️", "kg"),
-    "com.google.body_fat": ("Body Fat", "📊", "%"),
-    "com.google.distance": ("Distance", "📏", "km"),
-    "com.google.floors": ("Floors", "🏢", "floors"),
-    "com.google.activity_level": ("Activity Level", "🏃", ""),
-    "com.google.blood_glucose": ("Blood Glucose", "🩸", "mg/dL"),
-    "com.google.hydration": ("Hydration", "💧", "ml"),
-    "com.google.sedentary_period": ("Sedentary Periods", "🪑", "min"),
+    "steps": ("Steps", "👣", "steps"),
+    "heart-rate": ("Heart Rate", "❤️", "bpm"),
+    "active-minutes": ("Active Zone Minutes", "🔥", "min"),
+    "calories-in-heart-rate-zone": ("Calories", "⚡", "kcal"),
+    "weight": ("Weight", "⚖️", "kg"),
+    "body-fat": ("Body Fat", "📊", "%"),
+    "distance": ("Distance", "📏", "km"),
+    "floors": ("Floors", "🏢", "floors"),
+    "sleep": ("Sleep", "😴", "hours"),
+    "blood-glucose": ("Blood Glucose", "🩸", "mg/dL"),
+    "oxygen-saturation": ("Oxygen Saturation", "🫁", "%"),
+    "respiratory-rate": ("Respiratory Rate", "🫁", "breaths/min"),
+    "body-temperature": ("Body Temperature", "🌡️", "°C"),
+    "blood-pressure": ("Blood Pressure", "💓", "mmHg"),
 }
 
 def fetch_daily_rollup(access_token, data_type, days=30):
-    """Fetch daily rollup data for a given data type."""
-    end_date = datetime.now().strftime("%Y-%m-%d")
-    start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    """Fetch daily rollup data for a given data type via gRPC Transcoding POST."""
+    today = datetime.now()
+    end_dt = today + timedelta(days=1)  # exclusive end
+    start_dt = today - timedelta(days=days)
 
-    url = f"{HEALTH_API_BASE}/users/me/dataTypes/{data_type}/dataPoints/dailyRollUp"
+    url = f"{HEALTH_API_BASE}/users/me/dataTypes/{data_type}/dataPoints:dailyRollUp"
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
     }
-    params = {
-        "startDate": start_date,
-        "endDate": end_date,
+    body = {
+        "range": {
+            "start": {"date": {"year": start_dt.year, "month": start_dt.month, "day": start_dt.day}},
+            "end": {"date": {"year": end_dt.year, "month": end_dt.month, "day": end_dt.day}},
+        }
     }
 
     try:
-        resp = requests.get(url, headers=headers, params=params, timeout=15)
+        resp = requests.post(url, headers=headers, json=body, timeout=15)
         if resp.status_code == 200:
             return resp.json()
+        elif resp.status_code == 400 and "Invalid data type" in resp.text:
+            return {"error": "invalid_type", "message": f"'{data_type}' is not a recognised data type"}
         elif resp.status_code == 404:
             return {"error": "no_data", "message": f"No data for {data_type}"}
         else:
@@ -173,21 +180,33 @@ def fetch_daily_rollup(access_token, data_type, days=30):
         return {"error": "network_error", "message": str(e)}
 
 def parse_rollup_value(point):
-    """Extract the value from a rollup data point."""
-    if "value" not in point:
+    """Extract the main numeric value from a DailyRollupDataPoint.
+
+    The value is a union field keyed by rollup type (e.g. 'steps', 'heartRate', 'calories').
+    """
+    value = point.get("value", {})
+    if not value:
         return None
-    for val_field in point["value"]:
-        for key in ["fpVal", "intVal", "doubleVal"]:
-            if key in val_field:
-                return val_field[key]
-        if "intVal" in val_field:
-            return val_field["intVal"]
-        if "stringVal" in val_field:
-            try:
-                return float(val_field["stringVal"])
-            except (ValueError, TypeError):
-                return None
+
+    # The union field name varies by data type — try common patterns
+    for field_name, field_val in value.items():
+        if isinstance(field_val, dict):
+            # Look for avg/min/max/sum aggregation fields
+            for agg in ["avg", "average", "sum", "total", "value"]:
+                if agg in field_val:
+                    v = field_val[agg]
+                    if isinstance(v, (int, float)):
+                        return v
+            # Maybe direct numeric fields
+            for k, v in field_val.items():
+                if isinstance(v, (int, float)) and k not in ("confidence",):
+                    return v
     return None
+
+def format_date_from_civil(civil_time):
+    """Convert a CivilDateTime dict to 'YYYY-MM-DD' string."""
+    d = civil_time.get("date", {})
+    return f"{d.get('year',0):04d}-{d.get('month',0):02d}-{d.get('day',0):02d}"
 
 def fetch_all_data(access_token, days=30):
     """Fetch all available data types."""
@@ -195,11 +214,11 @@ def fetch_all_data(access_token, days=30):
     for data_type, (name, icon, unit) in DATA_TYPES.items():
         raw = fetch_daily_rollup(access_token, data_type, days)
         if "error" in raw:
-            results[data_type] = {"name": name, "icon": icon, "unit": unit, "error": raw["error"], "points": []}
+            results[data_type] = {"name": name, "icon": icon, "unit": unit, "error": raw["error"], "message": raw.get("message", ""), "points": []}
         else:
             points = []
-            for dp in raw.get("dataPoints", []):
-                date_str = dp.get("date")
+            for dp in raw.get("dailyRollupDataPoints", []):
+                date_str = format_date_from_civil(dp.get("civilStartTime", {}))
                 val = parse_rollup_value(dp)
                 if date_str and val is not None:
                     points.append({"date": date_str, "value": round(val, 2)})
