@@ -135,23 +135,21 @@ DATA_TYPES = {
     "steps": ("Steps", "👣", "steps"),
     "heart-rate": ("Heart Rate", "❤️", "bpm"),
     "active-minutes": ("Active Zone Minutes", "🔥", "min"),
-    "calories-in-heart-rate-zone": ("Calories", "⚡", "kcal"),
+    "calories-in-heart-rate-zone": ("Calories (HR Zones)", "💪", "kcal"),
+    "total-calories": ("Total Calories", "⚡", "kcal"),
+    "distance": ("Distance", "📏", "km"),
     "weight": ("Weight", "⚖️", "kg"),
     "body-fat": ("Body Fat", "📊", "%"),
-    "distance": ("Distance", "📏", "km"),
     "floors": ("Floors", "🏢", "floors"),
-    "sleep": ("Sleep", "😴", "hours"),
     "blood-glucose": ("Blood Glucose", "🩸", "mg/dL"),
-    "oxygen-saturation": ("Oxygen Saturation", "🫁", "%"),
-    "respiratory-rate": ("Respiratory Rate", "🫁", "breaths/min"),
-    "body-temperature": ("Body Temperature", "🌡️", "°C"),
-    "blood-pressure": ("Blood Pressure", "💓", "mmHg"),
 }
 
-def fetch_daily_rollup(access_token, data_type, days=30):
+def fetch_daily_rollup(access_token, data_type, days=14):
     """Fetch daily rollup data for a given data type via gRPC Transcoding POST."""
     today = datetime.now()
     end_dt = today + timedelta(days=1)  # exclusive end
+    # Most data types have a 14-day window limit; cap at 13 days of data
+    days = min(days, 13)
     start_dt = today - timedelta(days=days)
 
     url = f"{HEALTH_API_BASE}/users/me/dataTypes/{data_type}/dataPoints:dailyRollUp"
@@ -179,28 +177,55 @@ def fetch_daily_rollup(access_token, data_type, days=30):
     except Exception as e:
         return {"error": "network_error", "message": str(e)}
 
-def parse_rollup_value(point):
+def parse_rollup_value(point, data_type=None):
     """Extract the main numeric value from a DailyRollupDataPoint.
 
-    The value is a union field keyed by rollup type (e.g. 'steps', 'heartRate', 'calories').
+    Each data type has a different union field and aggregation structure.
+    Returns the most meaningful daily metric (average or sum).
     """
-    value = point.get("value", {})
-    if not value:
-        return None
+    # Known aggregation patterns: {dataTypeField: {aggField: value}}
+    # e.g. {"steps": {"countSum": "3303"}}, {"heartRate": {"beatsPerMinuteAvg": 57.7}}
+    # e.g. {"distance": {"millimetersSum": "2381800"}}
 
-    # The union field name varies by data type — try common patterns
-    for field_name, field_val in value.items():
-        if isinstance(field_val, dict):
-            # Look for avg/min/max/sum aggregation fields
-            for agg in ["avg", "average", "sum", "total", "value"]:
-                if agg in field_val:
-                    v = field_val[agg]
-                    if isinstance(v, (int, float)):
-                        return v
-            # Maybe direct numeric fields
-            for k, v in field_val.items():
-                if isinstance(v, (int, float)) and k not in ("confidence",):
-                    return v
+    # Skip metadata-only fields
+    skip_fields = {"civilStartTime", "civilEndTime"}
+
+    for field_name, field_val in point.items():
+        if field_name in skip_fields:
+            continue
+        if not isinstance(field_val, dict):
+            continue
+
+        # Handle array-based rollups (activeMinutes, caloriesInHeartRateZone)
+        array_fields = {
+            "activeMinutesRollupByActivityLevel": "activeMinutesSum",
+            "caloriesInHeartRateZones": "kcal",
+        }
+        for array_key, sub_key in array_fields.items():
+            if array_key in field_val:
+                total = 0
+                for entry in field_val[array_key]:
+                    v = entry.get(sub_key, 0)
+                    total += float(v) if isinstance(v, str) else v
+                return total
+
+        # For other types: prefer *Avg, fall back to *Sum, then any numeric
+        agg_keys = list(field_val.keys())
+        for preferred in ["Avg", "Average"]:
+            for key in agg_keys:
+                if key.endswith(preferred):
+                    v = field_val[key]
+                    return float(v) if isinstance(v, str) else v
+        for key in agg_keys:
+            v = field_val[key]
+            if isinstance(v, (int, float)):
+                return v
+            if isinstance(v, str):
+                try:
+                    return float(v)
+                except ValueError:
+                    pass
+
     return None
 
 def format_date_from_civil(civil_time):
@@ -208,19 +233,28 @@ def format_date_from_civil(civil_time):
     d = civil_time.get("date", {})
     return f"{d.get('year',0):04d}-{d.get('month',0):02d}-{d.get('day',0):02d}"
 
-def fetch_all_data(access_token, days=30):
+# Unit conversions for raw API values -> display units
+VALUE_TRANSFORMS = {
+    "distance": lambda v: round(v / 1_000_000, 2),  # mm -> km
+}
+
+
+def fetch_all_data(access_token, days=14):
     """Fetch all available data types."""
     results = {}
     for data_type, (name, icon, unit) in DATA_TYPES.items():
         raw = fetch_daily_rollup(access_token, data_type, days)
+        transform = VALUE_TRANSFORMS.get(data_type)
         if "error" in raw:
             results[data_type] = {"name": name, "icon": icon, "unit": unit, "error": raw["error"], "message": raw.get("message", ""), "points": []}
         else:
             points = []
-            for dp in raw.get("dailyRollupDataPoints", []):
+            for dp in raw.get("rollupDataPoints", []):
                 date_str = format_date_from_civil(dp.get("civilStartTime", {}))
                 val = parse_rollup_value(dp)
                 if date_str and val is not None:
+                    if transform:
+                        val = transform(val)
                     points.append({"date": date_str, "value": round(val, 2)})
             points.sort(key=lambda p: p["date"])
             today_val = points[-1]["value"] if points else None
