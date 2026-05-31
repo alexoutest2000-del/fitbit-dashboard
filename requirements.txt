@@ -1,0 +1,5 @@
+flask>=3.0
+requests>=2.31
+google-auth>=2.27
+google-auth-oauthlib>=1.2
+pyyaml>=6.0
